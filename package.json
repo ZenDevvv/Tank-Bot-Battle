@@ -1,0 +1,17 @@
+{
+  "name": "tank-bot-battle",
+  "private": true,
+  "version": "1.0.0",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @tank-bot-battle/shared && npm run build --workspace @tank-bot-battle/api && npm run build --workspace @tank-bot-battle/web",
+    "dev": "npm run build --workspace @tank-bot-battle/shared && npm run dev --workspace @tank-bot-battle/api",
+    "dev:web": "npm run build --workspace @tank-bot-battle/shared && npm run dev --workspace @tank-bot-battle/web",
+    "dev:api": "npm run build --workspace @tank-bot-battle/shared && npm run dev --workspace @tank-bot-battle/api",
+    "test": "npm run build --workspace @tank-bot-battle/shared && npm run test --workspace @tank-bot-battle/shared && npm run test --workspace @tank-bot-battle/api && npm run test --workspace @tank-bot-battle/web",
+    "lint": "npm run lint --workspace @tank-bot-battle/shared && npm run lint --workspace @tank-bot-battle/api && npm run lint --workspace @tank-bot-battle/web"
+  }
+}

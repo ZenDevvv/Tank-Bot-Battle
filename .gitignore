@@ -1,0 +1,9 @@
+node_modules
+dist
+coverage
+.env
+.env.*
+!.env.example
+*.tsbuildinfo
+package-lock.json
+apps/web/vite.config.d.ts
