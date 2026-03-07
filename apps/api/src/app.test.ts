@@ -1,6 +1,7 @@
 import mongoose from "mongoose";
 import { MongoMemoryServer } from "mongodb-memory-server";
 import request from "supertest";
+import { botDefinitionExample, type MatchSnapshot } from "@tank-bot-battle/shared";
 import { app, prepareApp } from "./app.js";
 import { disconnectDatabase } from "./db.js";
 
@@ -59,6 +60,16 @@ describe("api app", () => {
     expect(create.body.name).toBe(example.body.name);
   });
 
+  it("returns only system bots from the public roster endpoint", async () => {
+    const response = await request(app)
+      .get("/bots/public")
+      .expect(200);
+
+    expect(response.body).toHaveLength(2);
+    expect(response.body.every((bot: { isSystem: boolean; ownerId: string | null; id: string }) => bot.isSystem && bot.ownerId === null)).toBe(true);
+    expect(response.body.some((bot: { id: string }) => bot.id === createdBotId)).toBe(false);
+  });
+
   it("creates matches and returns replay access", async () => {
     const bots = await request(app)
       .get("/bots")
@@ -67,13 +78,68 @@ describe("api app", () => {
     const maps = await request(app).get("/maps").expect(200);
 
     const systemBot = bots.body.find((bot: { isSystem: boolean }) => bot.isSystem);
+    const replay: MatchSnapshot[] = [
+      {
+        tick: 0,
+        tanks: [
+          {
+            id: "left",
+            name: "Client Bot",
+            position: { x: 110, y: 110 },
+            rotation: 0,
+            health: 3,
+            cooldownTicks: 0
+          },
+          {
+            id: "right",
+            name: "System Bot",
+            position: { x: 850, y: 530 },
+            rotation: Math.PI,
+            health: 3,
+            cooldownTicks: 0
+          }
+        ],
+        bullets: [],
+        effects: []
+      },
+      {
+        tick: 1,
+        tanks: [
+          {
+            id: "left",
+            name: "Client Bot",
+            position: { x: 114, y: 110 },
+            rotation: 0.08,
+            health: 3,
+            cooldownTicks: 23
+          },
+          {
+            id: "right",
+            name: "System Bot",
+            position: { x: 846, y: 530 },
+            rotation: Math.PI - 0.08,
+            health: 2,
+            cooldownTicks: 0
+          }
+        ],
+        bullets: [],
+        effects: []
+      }
+    ];
+    const finalState = replay[replay.length - 1];
+
     const match = await request(app)
       .post("/matches")
       .set("Authorization", `Bearer ${token}`)
       .send({
         leftBotId: createdBotId,
         rightBotId: systemBot.id,
-        mapId: maps.body[0].id
+        mapId: maps.body[0].id,
+        winnerTankId: "left",
+        reason: "elimination",
+        totalTicks: finalState.tick,
+        replay,
+        finalState
       })
       .expect(201);
 

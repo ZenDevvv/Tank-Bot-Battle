@@ -3,9 +3,7 @@ import express from "express";
 import {
   botDefinitionExample,
   botDefinitionJsonSchema,
-  createInitialTankState,
   fixedMaps,
-  simulateMatch,
   validateBotDefinition
 } from "@tank-bot-battle/shared";
 import { createToken, hashPassword, requireAuth, verifyPassword, type AuthenticatedRequest } from "./auth.js";
@@ -20,7 +18,7 @@ import { seedStaticContent } from "./seed.js";
 export const app = express();
 
 app.use(cors());
-app.use(express.json({ limit: "50kb" }));
+app.use(express.json({ limit: "5mb" }));
 
 app.get("/health", (_request, response) => {
   response.json({ ok: true });
@@ -127,6 +125,20 @@ app.get("/maps", async (_request, response) => {
   })));
 });
 
+app.get("/bots/public", async (_request, response) => {
+  const bots = await BotModel.find({ isSystem: true }).sort({ name: 1 });
+
+  response.json(bots.map((bot) => ({
+    id: bot._id.toString(),
+    ownerId: null,
+    name: bot.name,
+    version: bot.version,
+    author: bot.author,
+    isSystem: true,
+    definition: bot.definition
+  })));
+});
+
 app.get("/bots", requireAuth, async (request: AuthenticatedRequest, response) => {
   const bots = await BotModel.find({
     $or: [
@@ -201,14 +213,19 @@ app.delete("/bots/:id", requireAuth, async (request: AuthenticatedRequest, respo
 });
 
 app.post("/matches", requireAuth, async (request: AuthenticatedRequest, response) => {
-  const { leftBotId, rightBotId, mapId } = request.body as {
+  const { leftBotId, rightBotId, mapId, winnerTankId, reason, totalTicks, replay, finalState } = request.body as {
     leftBotId?: string;
     rightBotId?: string;
     mapId?: string;
+    winnerTankId?: string | null;
+    reason?: string;
+    totalTicks?: number;
+    replay?: unknown[];
+    finalState?: unknown;
   };
 
-  if (!leftBotId || !rightBotId || !mapId) {
-    response.status(400).json({ message: "leftBotId, rightBotId, and mapId are required" });
+  if (!leftBotId || !rightBotId || !mapId || !reason || typeof totalTicks !== "number" || !Array.isArray(replay) || !finalState) {
+    response.status(400).json({ message: "leftBotId, rightBotId, mapId, reason, totalTicks, replay, and finalState are required" });
     return;
   }
 
@@ -229,60 +246,36 @@ app.post("/matches", requireAuth, async (request: AuthenticatedRequest, response
     return;
   }
 
-  const map = fixedMaps.find((candidate) => candidate.id === mapDoc.mapId);
-  if (!map) {
+  if (!fixedMaps.some((candidate) => candidate.id === mapDoc.mapId)) {
     response.status(404).json({ message: "Map definition missing" });
     return;
   }
-
-  const result = simulateMatch({
-    map,
-    seed: `${leftBotId}:${rightBotId}:${mapId}`,
-    tanks: [
-      createInitialTankState({
-        id: "left",
-        name: leftBot.name,
-        position: map.spawnPoints[0],
-        rotation: 0,
-        isManual: false,
-        bot: validateBotDefinition(leftBot.definition)
-      }),
-      createInitialTankState({
-        id: "right",
-        name: rightBot.name,
-        position: map.spawnPoints[1],
-        rotation: Math.PI,
-        isManual: false,
-        bot: validateBotDefinition(rightBot.definition)
-      })
-    ]
-  });
 
   const match = await MatchModel.create({
     ownerId: request.userId,
     leftBotId,
     rightBotId,
-    mapId: result.mapId,
-    winnerTankId: result.winnerTankId,
-    reason: result.reason,
-    totalTicks: result.totalTicks,
-    replay: result.replay,
-    finalState: result.finalState
+    mapId,
+    winnerTankId: winnerTankId ?? null,
+    reason,
+    totalTicks,
+    replay,
+    finalState
   });
 
   logEvent("match.completed", {
     matchId: match._id.toString(),
-    winnerTankId: result.winnerTankId,
-    totalTicks: result.totalTicks,
-    mapId: result.mapId
+    winnerTankId: winnerTankId ?? null,
+    totalTicks,
+    mapId
   });
 
   response.status(201).json({
     id: match._id.toString(),
-    winnerTankId: result.winnerTankId,
-    reason: result.reason,
-    totalTicks: result.totalTicks,
-    replayLength: result.replay.length
+    winnerTankId: winnerTankId ?? null,
+    reason,
+    totalTicks,
+    replayLength: replay.length
   });
 });
 

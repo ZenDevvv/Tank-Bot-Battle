@@ -40,3 +40,18 @@ export type ReplayRecord = {
   id: string;
   replay: MatchSnapshot[];
 };
+
+export type BattlefieldMode = "live" | "result" | "replay" | "replayComplete";
+
+export type ReplaySpeed = 0.25 | 0.5 | 1 | 2 | 4;
+
+export type BattleOutcome = {
+  winnerTankId: string | null;
+  winnerName: string | null;
+  leftTankName: string;
+  rightTankName: string;
+  reason: string;
+  totalTicks: number;
+  mapId: string;
+  source: "liveResult" | "savedReplay";
+};

@@ -1,4 +1,13 @@
 import "@testing-library/jest-dom";
+import { TextDecoder, TextEncoder } from "util";
+
+Object.defineProperty(globalThis, "TextEncoder", {
+  value: TextEncoder
+});
+
+Object.defineProperty(globalThis, "TextDecoder", {
+  value: TextDecoder
+});
 
 Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
   value: () => ({
@@ -7,6 +16,7 @@ Object.defineProperty(HTMLCanvasElement.prototype, "getContext", {
     beginPath: () => undefined,
     arc: () => undefined,
     fill: () => undefined,
+    stroke: () => undefined,
     save: () => undefined,
     translate: () => undefined,
     rotate: () => undefined,

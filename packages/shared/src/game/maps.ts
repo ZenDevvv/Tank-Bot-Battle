@@ -36,5 +36,23 @@ export const fixedMaps: ArenaMap[] = [
       { x: 420, y: 220, width: 120, height: 30 },
       { x: 420, y: 400, width: 120, height: 30 }
     ]
+  },
+  {
+    id: "switchback",
+    name: "Switchback",
+    width: ARENA_WIDTH,
+    height: ARENA_HEIGHT,
+    spawnPoints: [
+      { x: 110, y: 520 },
+      { x: 850, y: 120 }
+    ],
+    walls: [
+      { x: 180, y: 100, width: 40, height: 420 },
+      { x: 340, y: 100, width: 40, height: 260 },
+      { x: 500, y: 280, width: 40, height: 240 },
+      { x: 660, y: 100, width: 40, height: 420 },
+      { x: 220, y: 100, width: 460, height: 40 },
+      { x: 220, y: 480, width: 460, height: 40 }
+    ]
   }
 ];

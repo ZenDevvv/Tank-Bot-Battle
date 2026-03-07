@@ -1,3 +1,4 @@
+import type { MatchSnapshot } from "@tank-bot-battle/shared";
 import type { AuthUser, BotRecord, MapRecord, MatchRecord, ReplayRecord } from "../types";
 
 function resolveApiBase(): string {
@@ -62,6 +63,9 @@ export const api = {
       body: JSON.stringify(payload)
     });
   },
+  listPublicBots() {
+    return request<BotRecord[]>("/bots/public");
+  },
   listMaps() {
     return request<MapRecord[]>("/maps");
   },
@@ -79,7 +83,16 @@ export const api = {
       method: "DELETE"
     }, token);
   },
-  createMatch(token: string, payload: { leftBotId: string; rightBotId: string; mapId: string }) {
+  createMatch(token: string, payload: {
+    leftBotId: string;
+    rightBotId: string;
+    mapId: string;
+    winnerTankId: string | null;
+    reason: string;
+    totalTicks: number;
+    replay: MatchSnapshot[];
+    finalState: MatchSnapshot;
+  }) {
     return request<{ id: string; winnerTankId: string | null; reason: string; totalTicks: number; replayLength: number }>("/matches", {
       method: "POST",
       body: JSON.stringify(payload)

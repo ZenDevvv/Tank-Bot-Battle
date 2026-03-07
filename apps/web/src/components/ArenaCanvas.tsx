@@ -49,6 +49,7 @@ export function ArenaCanvas({ replay, mapId, autoplay = true }: ArenaCanvasProps
 
     const map = resolveMap(mapId);
     const frame = replay[Math.min(frameIndex, replay.length - 1)];
+    const effects = frame.effects ?? [];
 
     context.clearRect(0, 0, canvas.width, canvas.height);
     context.fillStyle = "#11213a";
@@ -64,6 +65,24 @@ export function ArenaCanvas({ replay, mapId, autoplay = true }: ArenaCanvasProps
       context.fillStyle = "#ffd76a";
       context.arc(bullet.position.x, bullet.position.y, 5, 0, Math.PI * 2);
       context.fill();
+    }
+
+    for (const effect of effects) {
+      const progress = effect.durationTicks === 0 ? 1 : effect.ageTicks / effect.durationTicks;
+      const radius = 8 + (progress * 12);
+
+      context.save();
+      context.globalAlpha = 1 - progress;
+      context.beginPath();
+      context.fillStyle = "#fff4b3";
+      context.arc(effect.position.x, effect.position.y, 4 + (progress * 4), 0, Math.PI * 2);
+      context.fill();
+      context.beginPath();
+      context.strokeStyle = "#ffb703";
+      context.lineWidth = 2;
+      context.arc(effect.position.x, effect.position.y, radius, 0, Math.PI * 2);
+      context.stroke();
+      context.restore();
     }
 
     for (const tank of frame.tanks) {
