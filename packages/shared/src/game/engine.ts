@@ -1,16 +1,12 @@
 import {
   BULLET_LIFETIME_TICKS,
   BULLET_RADIUS,
-  BULLET_SPEED,
-  FIRE_COOLDOWN_TICKS,
   MAX_BOUNCES,
   MAX_TICKS,
   TANK_MAX_HEALTH,
-  TANK_RADIUS,
-  TANK_REVERSE_SPEED,
-  TANK_SPEED,
-  TANK_TURN_SPEED
+  TANK_RADIUS
 } from "./constants.js";
+import { defaultBotStats, TANK_STAT_BUDGET, tankStatKeys, type BotStats } from "../schema/bot.js";
 import { chooseIntent } from "./botInterpreter.js";
 import type {
   ArenaMap,
@@ -23,6 +19,7 @@ import type {
   MatchResult,
   MatchSnapshot,
   Rect,
+  ResolvedTankStats,
   TankIntent,
   TankState,
   Vector2
@@ -37,6 +34,32 @@ function distanceBetween(from: Vector2, to: Vector2): number {
     x: to.x - from.x,
     y: to.y - from.y
   });
+}
+
+function isBotStats(value: unknown): value is BotStats {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return tankStatKeys.every((key) => {
+    const stat = candidate[key];
+    return Number.isInteger(stat) && Number(stat) >= 0 && Number(stat) <= 100;
+  }) && tankStatKeys.reduce((sum, key) => sum + Number(candidate[key]), 0) === TANK_STAT_BUDGET;
+}
+
+function resolveBaseStats(stats: BotStats | undefined): BotStats {
+  return isBotStats(stats) ? stats : defaultBotStats;
+}
+
+export function resolveTankStats(baseStats: BotStats): ResolvedTankStats {
+  return {
+    forwardSpeed: 1.6 + (0.02 * baseStats.forwardSpeed),
+    reverseSpeed: 0.9 + (0.015 * baseStats.reverseSpeed),
+    rotationSpeed: 0.026 + (0.0003 * baseStats.rotationSpeed),
+    shotCooldownTicks: Math.round(36 - (0.2 * baseStats.fireRate)),
+    bulletSpeed: 4 + (0.03 * baseStats.bulletSpeed)
+  };
 }
 
 function midpoint(a: Vector2, b: Vector2): Vector2 {
@@ -208,6 +231,10 @@ function healthBand(healthRatio: number): "near" | "medium" | "far" {
 
 function bearingToTarget(from: Vector2, rotation: number, target: Vector2): number {
   return normalizeAngle(Math.atan2(target.y - from.y, target.x - from.x) - rotation);
+}
+
+function reverseBearingToTarget(from: Vector2, rotation: number, target: Vector2): number {
+  return normalizeAngle(bearingToTarget(from, rotation, target) + Math.PI);
 }
 
 function hasLineOfSight(from: Vector2, to: Vector2, walls: Rect[]): boolean {
@@ -395,6 +422,374 @@ function findNavigationTarget(from: Vector2, target: Vector2, map: ArenaMap): Ve
   return path[1] === undefined ? clampedTarget : nodes[path[1]];
 }
 
+function crossSideScore(from: Vector2, target: Vector2, waypoint: Vector2): number {
+  const toTarget = subtract(target, from);
+  const toWaypoint = subtract(waypoint, from);
+  const denominator = Math.max(1, length(toTarget) * length(toWaypoint));
+  return clamp(((toTarget.x * toWaypoint.y) - (toTarget.y * toWaypoint.x)) / denominator * 120, -1, 1);
+}
+
+function distanceFromWalls(point: Vector2, map: ArenaMap): number {
+  const distances = [
+    point.x,
+    point.y,
+    map.width - point.x,
+    map.height - point.y,
+    ...map.walls.map((wall) => {
+      const nearestX = clamp(point.x, wall.x, wall.x + wall.width);
+      const nearestY = clamp(point.y, wall.y, wall.y + wall.height);
+      return length({ x: point.x - nearestX, y: point.y - nearestY });
+    })
+  ];
+
+  return Math.min(...distances);
+}
+
+function coverScoreAtPoint(point: Vector2, threatAnchor: Vector2, map: ArenaMap): number {
+  const hiddenScore = hasLineOfSight(threatAnchor, point, map.walls) ? 0.1 : 0.68;
+  const wallSupport = clamp(1 - (distanceFromWalls(point, map) / 220), 0, 1);
+  return clamp(hiddenScore + (wallSupport * 0.32), 0, 1);
+}
+
+function routeSafetyBetween(from: Vector2, to: Vector2, threatAnchor: Vector2, map: ArenaMap): number {
+  const distance = distanceBetween(from, to);
+  const steps = Math.max(4, Math.ceil(distance / 80));
+  let hiddenSamples = 0;
+
+  for (let index = 1; index <= steps; index += 1) {
+    const sample = {
+      x: from.x + (((to.x - from.x) * index) / steps),
+      y: from.y + (((to.y - from.y) * index) / steps)
+    };
+
+    if (!hasLineOfSight(threatAnchor, sample, map.walls)) {
+      hiddenSamples += 1;
+    }
+  }
+
+  return hiddenSamples / steps;
+}
+
+function chooseBestWaypoint(map: ArenaMap, scorer: (point: Vector2) => number): Vector2 | null {
+  let bestPoint: Vector2 | null = null;
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  for (const point of collectNavigationWaypoints(map)) {
+    const score = scorer(point);
+    if (score > bestScore) {
+      bestScore = score;
+      bestPoint = point;
+    }
+  }
+
+  return bestPoint;
+}
+
+function selectRoamTarget(tank: TankState, searchPosition: Vector2, threatAnchor: Vector2, map: ArenaMap): Vector2 {
+  const currentTarget = tank.aiMemory.roamTarget;
+  if (currentTarget && distanceBetween(tank.position, currentTarget) > 44 && pointIsNavigable(currentTarget, map)) {
+    return currentTarget;
+  }
+
+  const openingChoice = tank.aiMemory.openingChoice;
+  const sideBias = openingChoice === "wideFlankLeft"
+    ? -1
+    : openingChoice === "wideFlankRight"
+      ? 1
+      : 0;
+  const preferCenter = openingChoice === "centerProbe";
+  const preferCover = openingChoice === "holdAngle";
+  const centerPoint = { x: map.width / 2, y: map.height / 2 };
+
+  const nextTarget = chooseBestWaypoint(map, (point) => {
+    const tankDistance = distanceBetween(tank.position, point);
+    if (tankDistance < 80) {
+      return Number.NEGATIVE_INFINITY;
+    }
+
+    const enemyDistance = distanceBetween(searchPosition, point);
+    const sideScore = sideBias === 0 ? 0 : (crossSideScore(tank.position, searchPosition, point) * sideBias * 18);
+    const routeScore = routeSafetyBetween(tank.position, point, threatAnchor, map) * 18;
+    const coverScore = coverScoreAtPoint(point, threatAnchor, map) * (preferCover ? 24 : 9);
+    const centerScore = preferCenter ? Math.max(0, 18 - (distanceBetween(point, centerPoint) / 28)) : 0;
+
+    return (16 - Math.abs(tankDistance - 220) / 18)
+      + (Math.min(enemyDistance, 360) / 60)
+      + sideScore
+      + routeScore
+      + coverScore
+      + centerScore;
+  }) ?? clampPointToArena(searchPosition, map);
+
+  tank.aiMemory.roamTarget = nextTarget;
+  return nextTarget;
+}
+
+function findCoverTarget(tank: TankState, searchPosition: Vector2, threatAnchor: Vector2, map: ArenaMap): Vector2 {
+  const currentCover = coverScoreAtPoint(tank.position, threatAnchor, map);
+  if (currentCover > 0.85 && distanceBetween(tank.position, searchPosition) > 110) {
+    return tank.position;
+  }
+
+  return chooseBestWaypoint(map, (point) => {
+    const coverScore = coverScoreAtPoint(point, threatAnchor, map);
+    if (coverScore < 0.46) {
+      return Number.NEGATIVE_INFINITY;
+    }
+
+    const tankDistance = distanceBetween(tank.position, point);
+    const peekAccess = hasLineOfSight(point, searchPosition, map.walls) ? 7 : 0;
+    return (coverScore * 34)
+      + (routeSafetyBetween(tank.position, point, threatAnchor, map) * 18)
+      + peekAccess
+      - (tankDistance / 16);
+  }) ?? tank.position;
+}
+
+function findPeekTarget(
+  tank: TankState,
+  searchPosition: Vector2,
+  threatAnchor: Vector2,
+  coverTarget: Vector2,
+  map: ArenaMap
+): Vector2 {
+  return chooseBestWaypoint(map, (point) => {
+    if (!hasLineOfSight(point, searchPosition, map.walls)) {
+      return Number.NEGATIVE_INFINITY;
+    }
+
+    const coverDistance = distanceBetween(coverTarget, point);
+    if (coverDistance > 240) {
+      return Number.NEGATIVE_INFINITY;
+    }
+
+    const targetDistance = distanceBetween(searchPosition, point);
+    return 30
+      - (coverDistance / 16)
+      - (Math.abs(targetDistance - 220) / 28)
+      + (routeSafetyBetween(tank.position, point, threatAnchor, map) * 8);
+  }) ?? findNavigationTarget(tank.position, searchPosition, map);
+}
+
+function findFlankTarget(
+  tank: TankState,
+  searchPosition: Vector2,
+  threatAnchor: Vector2,
+  direction: -1 | 1,
+  map: ArenaMap
+): Vector2 {
+  return chooseBestWaypoint(map, (point) => {
+    const sideScore = crossSideScore(tank.position, searchPosition, point) * direction;
+    const targetDistance = distanceBetween(searchPosition, point);
+    const hiddenBonus = hasLineOfSight(threatAnchor, point, map.walls) ? 0 : 10;
+    return (sideScore * 26)
+      + (routeSafetyBetween(tank.position, point, threatAnchor, map) * 20)
+      + hiddenBonus
+      + (12 - Math.abs(targetDistance - 180) / 24);
+  }) ?? findNavigationTarget(tank.position, searchPosition, map);
+}
+
+function findRetreatTarget(tank: TankState, threatAnchor: Vector2, coverTarget: Vector2, map: ArenaMap): Vector2 {
+  if (distanceBetween(tank.position, coverTarget) > 24) {
+    return coverTarget;
+  }
+
+  const retreatVector = subtract(tank.position, threatAnchor);
+  const retreatDistance = length(retreatVector);
+  const fallbackDirection = retreatDistance === 0
+    ? { x: Math.cos(tank.rotation + Math.PI), y: Math.sin(tank.rotation + Math.PI) }
+    : scale(retreatVector, 1 / retreatDistance);
+  const retreatPoint = clampPointToArena(add(tank.position, scale(fallbackDirection, 180)), map);
+
+  return findNavigationTarget(tank.position, retreatPoint, map);
+}
+
+function findReverseEscapeTarget(
+  tank: TankState,
+  threatAnchor: Vector2,
+  retreatTarget: Vector2,
+  coverTarget: Vector2,
+  map: ArenaMap
+): Vector2 {
+  const backwardProbe = clampPointToArena(
+    add(tank.position, scale({
+      x: Math.cos(tank.rotation + Math.PI),
+      y: Math.sin(tank.rotation + Math.PI)
+    }, 180)),
+    map
+  );
+
+  const scoredWaypoint = chooseBestWaypoint(map, (point) => {
+    const candidate = findNavigationTarget(tank.position, point, map);
+    const candidateDistance = distanceBetween(tank.position, candidate);
+    if (candidateDistance < 32) {
+      return Number.NEGATIVE_INFINITY;
+    }
+
+    const reverseAlignment = clamp(1 - (Math.abs(reverseBearingToTarget(tank.position, tank.rotation, candidate)) / Math.PI), 0, 1);
+    const coverScore = coverScoreAtPoint(candidate, threatAnchor, map);
+    const routeScore = routeSafetyBetween(tank.position, candidate, threatAnchor, map);
+    const threatDistanceScore = clamp(distanceBetween(candidate, threatAnchor) / 320, 0, 1);
+    const travelScore = clamp(candidateDistance / 180, 0, 1);
+
+    return (reverseAlignment * 26)
+      + (routeScore * 18)
+      + (coverScore * 14)
+      + (threatDistanceScore * 8)
+      + (travelScore * 6);
+  });
+
+  const rawCandidates = [
+    retreatTarget,
+    coverTarget,
+    backwardProbe,
+    scoredWaypoint ?? retreatTarget
+  ];
+
+  const uniqueCandidates = new Map<string, Vector2>();
+  for (const candidate of rawCandidates) {
+    const target = findNavigationTarget(tank.position, candidate, map);
+    uniqueCandidates.set(pointKey(target), target);
+  }
+
+  let bestTarget = retreatTarget;
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  for (const candidate of uniqueCandidates.values()) {
+    const candidateDistance = distanceBetween(tank.position, candidate);
+    const reverseAlignment = clamp(1 - (Math.abs(reverseBearingToTarget(tank.position, tank.rotation, candidate)) / Math.PI), 0, 1);
+    const coverScore = coverScoreAtPoint(candidate, threatAnchor, map);
+    const routeScore = routeSafetyBetween(tank.position, candidate, threatAnchor, map);
+    const travelScore = clamp(candidateDistance / 180, 0, 1);
+
+    const score = (reverseAlignment * 24)
+      + (routeScore * 18)
+      + (coverScore * 12)
+      + (travelScore * 8);
+
+    if (score > bestScore) {
+      bestScore = score;
+      bestTarget = candidate;
+    }
+  }
+
+  return bestTarget;
+}
+
+function reverseClearanceScore(tank: TankState, map: ArenaMap): number {
+  const maxDistance = 180;
+  const sampleStep = 18;
+  const backwardRotation = normalizeAngle(tank.rotation + Math.PI);
+  let clearance = maxDistance;
+
+  for (let distance = sampleStep; distance <= maxDistance; distance += sampleStep) {
+    const sample = advancePosition(tank.position, backwardRotation, distance);
+    if (tankHitsWall(sample, map)) {
+      clearance = distance - sampleStep;
+      break;
+    }
+  }
+
+  return clamp(clearance / maxDistance, 0, 1);
+}
+
+function findBaitTarget(
+  tank: TankState,
+  coverTarget: Vector2,
+  peekTarget: Vector2
+): Vector2 {
+  return tank.aiMemory.activeTacticTicks % 24 < 12 ? peekTarget : coverTarget;
+}
+
+type ArenaBoundary = "left" | "right" | "top" | "bottom";
+
+function reflectAcrossBoundary(point: Vector2, boundary: ArenaBoundary, map: ArenaMap): Vector2 {
+  switch (boundary) {
+    case "left":
+      return { x: -point.x, y: point.y };
+    case "right":
+      return { x: (map.width * 2) - point.x, y: point.y };
+    case "top":
+      return { x: point.x, y: -point.y };
+    case "bottom":
+      return { x: point.x, y: (map.height * 2) - point.y };
+    default:
+      return point;
+  }
+}
+
+function boundaryBouncePoint(from: Vector2, reflectedTarget: Vector2, boundary: ArenaBoundary, map: ArenaMap): Vector2 | null {
+  if (boundary === "left" || boundary === "right") {
+    const boundaryX = boundary === "left" ? 0 : map.width;
+    const denominator = reflectedTarget.x - from.x;
+    if (denominator === 0) {
+      return null;
+    }
+
+    const progress = (boundaryX - from.x) / denominator;
+    if (progress <= 0 || progress >= 1) {
+      return null;
+    }
+
+    const y = from.y + ((reflectedTarget.y - from.y) * progress);
+    if (y <= 0 || y >= map.height) {
+      return null;
+    }
+
+    return { x: boundaryX, y };
+  }
+
+  const boundaryY = boundary === "top" ? 0 : map.height;
+  const denominator = reflectedTarget.y - from.y;
+  if (denominator === 0) {
+    return null;
+  }
+
+  const progress = (boundaryY - from.y) / denominator;
+  if (progress <= 0 || progress >= 1) {
+    return null;
+  }
+
+  const x = from.x + ((reflectedTarget.x - from.x) * progress);
+  if (x <= 0 || x >= map.width) {
+    return null;
+  }
+
+  return { x, y: boundaryY };
+}
+
+function findBoundaryBankShot(from: Vector2, target: Vector2, map: ArenaMap): { opportunity: number; bearing: number } {
+  const boundaries: ArenaBoundary[] = ["left", "right", "top", "bottom"];
+  let bestOpportunity = 0;
+  let bestBearing = 0;
+
+  for (const boundary of boundaries) {
+    const reflectedTarget = reflectAcrossBoundary(target, boundary, map);
+    const bouncePoint = boundaryBouncePoint(from, reflectedTarget, boundary, map);
+    if (!bouncePoint) {
+      continue;
+    }
+
+    if (!hasLineOfSight(from, bouncePoint, map.walls) || !hasLineOfSight(bouncePoint, target, map.walls)) {
+      continue;
+    }
+
+    const bearing = bearingToTarget(from, 0, bouncePoint);
+    const opportunity = clamp(1 - (Math.abs(bearing) / (Math.PI / 1.5)), 0, 1);
+    if (opportunity > bestOpportunity) {
+      bestOpportunity = opportunity;
+      bestBearing = bouncePoint.y === 0 || bouncePoint.y === map.height
+        ? Math.atan2(bouncePoint.y - from.y, bouncePoint.x - from.x)
+        : Math.atan2(bouncePoint.y - from.y, bouncePoint.x - from.x);
+    }
+  }
+
+  return {
+    opportunity: bestOpportunity,
+    bearing: bestBearing
+  };
+}
+
 function computeSensors(
   tank: TankState,
   enemy: TankState,
@@ -430,8 +825,18 @@ function computeSensors(
       y: memory.lastSeenEnemyPosition.y + (memory.lastSeenEnemyVelocity.y * Math.min(memory.ticksSinceEnemySeen, 18))
     }
     : enemy.position;
+  const threatAnchor = enemyVisible ? enemy.position : searchPosition;
   const navigationTarget = findNavigationTarget(tank.position, searchPosition, map);
-  const interceptTicks = clamp(distance / BULLET_SPEED, 0, 18);
+  const roamTarget = selectRoamTarget(tank, searchPosition, threatAnchor, map);
+  const coverTarget = findCoverTarget(tank, searchPosition, threatAnchor, map);
+  const peekTarget = findPeekTarget(tank, searchPosition, threatAnchor, coverTarget, map);
+  const flankLeftTarget = findFlankTarget(tank, searchPosition, threatAnchor, -1, map);
+  const flankRightTarget = findFlankTarget(tank, searchPosition, threatAnchor, 1, map);
+  const retreatTarget = findRetreatTarget(tank, threatAnchor, coverTarget, map);
+  const reverseEscapeTarget = findReverseEscapeTarget(tank, threatAnchor, retreatTarget, coverTarget, map);
+  const baitTarget = findBaitTarget(tank, coverTarget, peekTarget);
+  const bankShot = findBoundaryBankShot(tank.position, searchPosition, map);
+  const interceptTicks = clamp(distance / tank.resolvedStats.bulletSpeed, 0, 18);
   const interceptPosition = enemyVisible
     ? {
       x: enemy.position.x + (enemyVelocity.x * interceptTicks),
@@ -453,6 +858,30 @@ function computeSensors(
 
   memory.previousEnemyDistance = distance;
 
+  const coverScore = coverScoreAtPoint(tank.position, threatAnchor, map);
+  const routeSafety = routeSafetyBetween(tank.position, navigationTarget, threatAnchor, map);
+  const reverseRouteSafety = routeSafetyBetween(tank.position, reverseEscapeTarget, threatAnchor, map);
+  const leftFlankOpportunity = routeSafetyBetween(tank.position, flankLeftTarget, threatAnchor, map);
+  const rightFlankOpportunity = routeSafetyBetween(tank.position, flankRightTarget, threatAnchor, map);
+  const flankOpportunity = Math.max(leftFlankOpportunity, rightFlankOpportunity);
+  const reverseEscapeBearing = reverseBearingToTarget(tank.position, tank.rotation, reverseEscapeTarget);
+  const reverseEscapeAlignment = clamp(1 - (Math.abs(reverseEscapeBearing) / Math.PI), 0, 1);
+  const reverseEscapeSafety = clamp(
+    (reverseClearanceScore(tank, map) * 0.45)
+    + (reverseRouteSafety * 0.3)
+    + (reverseEscapeAlignment * 0.15)
+    + (coverScoreAtPoint(reverseEscapeTarget, threatAnchor, map) * 0.1),
+    0,
+    1
+  );
+  const exposureScore = clamp(
+    (enemyVisible ? 0.72 : 0.2)
+    + ((1 - coverScore) * 0.28)
+    + (wallMetric.proximity * 0.08),
+    0,
+    1
+  );
+
   return {
     enemyVisible,
     enemyBearing: bearing,
@@ -464,11 +893,27 @@ function computeSensors(
     bulletThreat: threatLevel > 0.2,
     bulletThreatLevel: threatLevel,
     interceptBearing: bearingToTarget(tank.position, tank.rotation, interceptPosition),
+    reverseEscapeBearing,
+    reverseEscapeSafety,
     searchBearing: bearingToTarget(tank.position, tank.rotation, navigationTarget),
     hasRecentEnemyContact: memory.ticksSinceEnemySeen < 18,
     stalled: memory.stalledTicks >= 12,
     ticksSinceEnemySeen: memory.ticksSinceEnemySeen,
     searchTurnDirection: memory.searchTurnDirection,
+    coverScore,
+    exposureScore,
+    routeSafety,
+    flankOpportunity,
+    bankShotOpportunity: bankShot.opportunity,
+    roamBearing: bearingToTarget(tank.position, tank.rotation, findNavigationTarget(tank.position, roamTarget, map)),
+    investigateBearing: bearingToTarget(tank.position, tank.rotation, navigationTarget),
+    coverBearing: bearingToTarget(tank.position, tank.rotation, findNavigationTarget(tank.position, coverTarget, map)),
+    peekBearing: bearingToTarget(tank.position, tank.rotation, findNavigationTarget(tank.position, peekTarget, map)),
+    flankLeftBearing: bearingToTarget(tank.position, tank.rotation, findNavigationTarget(tank.position, flankLeftTarget, map)),
+    flankRightBearing: bearingToTarget(tank.position, tank.rotation, findNavigationTarget(tank.position, flankRightTarget, map)),
+    retreatBearing: bearingToTarget(tank.position, tank.rotation, retreatTarget),
+    baitBearing: bearingToTarget(tank.position, tank.rotation, findNavigationTarget(tank.position, baitTarget, map)),
+    bankShotBearing: normalizeAngle(bankShot.bearing - tank.rotation),
     cooldownReady: tank.cooldownTicks === 0,
     stuckTimer: tank.stuckTimer,
     healthRatio,
@@ -481,6 +926,7 @@ function createBullet(tank: TankState, tick: number): BulletState {
     x: Math.cos(tank.rotation),
     y: Math.sin(tank.rotation)
   };
+  const bulletSpeed = tank.resolvedStats.bulletSpeed;
 
   return {
     id: `${tank.id}-bullet-${tick}`,
@@ -490,8 +936,8 @@ function createBullet(tank: TankState, tick: number): BulletState {
       y: tank.position.y + direction.y * (TANK_RADIUS + BULLET_RADIUS + 2)
     },
     velocity: {
-      x: direction.x * BULLET_SPEED,
-      y: direction.y * BULLET_SPEED
+      x: direction.x * bulletSpeed,
+      y: direction.y * bulletSpeed
     },
     remainingBounces: MAX_BOUNCES,
     ageTicks: 0
@@ -532,15 +978,29 @@ function createImpactEffect(tick: number, leftBulletId: string, rightBulletId: s
   };
 }
 
+function createTankHitEffect(tick: number, tank: TankState): ImpactEffect {
+  return {
+    id: `tank-hit-${tick}-${tank.id}`,
+    kind: "tankHit",
+    tankId: tank.id,
+    position: { ...tank.position },
+    remainingHealth: tank.health,
+    ageTicks: 0,
+    durationTicks: tank.health <= 0 ? 14 : 10
+  };
+}
+
 function moveTank(tank: TankState, map: ArenaMap): boolean {
   let moved = false;
 
   if (tank.intent.steer !== 0) {
-    tank.rotation = normalizeAngle(tank.rotation + (TANK_TURN_SPEED * tank.intent.steer));
+    tank.rotation = normalizeAngle(tank.rotation + (tank.resolvedStats.rotationSpeed * tank.intent.steer));
   }
 
   if (tank.intent.throttle !== 0) {
-    const speed = tank.intent.throttle > 0 ? TANK_SPEED : -TANK_REVERSE_SPEED;
+    const speed = tank.intent.throttle > 0
+      ? tank.resolvedStats.forwardSpeed
+      : -tank.resolvedStats.reverseSpeed;
     const nextPosition = advancePosition(tank.position, tank.rotation, speed);
     if (!tankHitsWall(nextPosition, map)) {
       tank.position = nextPosition;
@@ -667,11 +1127,26 @@ function defaultIntent(): TankIntent {
   };
 }
 
+function emptyTacticCooldowns() {
+  return {
+    roam: 0,
+    investigateLastSeen: 0,
+    takeCover: 0,
+    peekShot: 0,
+    flank: 0,
+    pressure: 0,
+    retreat: 0,
+    baitShot: 0
+  };
+}
+
 export function createBattleSession(input: EngineInput): BattleSession {
   return {
     map: input.map,
     tanks: input.tanks.map((tank) => ({
       ...tank,
+      baseStats: { ...tank.baseStats },
+      resolvedStats: { ...tank.resolvedStats },
       position: { ...tank.position },
       lastPosition: { ...tank.lastPosition },
       intent: tank.intent ?? defaultIntent(),
@@ -680,7 +1155,12 @@ export function createBattleSession(input: EngineInput): BattleSession {
       aiMemory: {
         ...tank.aiMemory,
         lastSeenEnemyPosition: tank.aiMemory.lastSeenEnemyPosition ? { ...tank.aiMemory.lastSeenEnemyPosition } : null,
-        lastSeenEnemyVelocity: { ...tank.aiMemory.lastSeenEnemyVelocity }
+        lastSeenEnemyVelocity: { ...tank.aiMemory.lastSeenEnemyVelocity },
+        roamTarget: tank.aiMemory.roamTarget ? { ...tank.aiMemory.roamTarget } : null,
+        reverseBurstTicksRemaining: tank.aiMemory.reverseBurstTicksRemaining ?? 0,
+        reverseHoldTicksRemaining: tank.aiMemory.reverseHoldTicksRemaining ?? 0,
+        reverseEscapeUnsafeTicks: tank.aiMemory.reverseEscapeUnsafeTicks ?? 0,
+        tacticCooldowns: { ...tank.aiMemory.tacticCooldowns }
       },
       manualScript: tank.manualScript ? [...tank.manualScript] : undefined
     })) as [TankState, TankState],
@@ -718,21 +1198,59 @@ export function stepBattleSession(session: BattleSession): MatchSnapshot {
       continue;
     }
 
+    if (tank.aiMemory.activeTacticId) {
+      tank.aiMemory.activeTacticTicks += 1;
+    }
+
+    if (tank.aiMemory.openingTicksRemaining > 0) {
+      tank.aiMemory.openingTicksRemaining -= 1;
+    }
+
+    tank.aiMemory.ticksSinceLastHit = Math.min(tank.aiMemory.ticksSinceLastHit + 1, 9999);
+
+    for (const tacticName of Object.keys(tank.aiMemory.tacticCooldowns) as Array<keyof typeof tank.aiMemory.tacticCooldowns>) {
+      if (tank.aiMemory.tacticCooldowns[tacticName] > 0) {
+        tank.aiMemory.tacticCooldowns[tacticName] -= 1;
+      }
+    }
+
     const previousPosition = { ...tank.position };
 
     if (tank.stuckTimer > 8 || tank.aiMemory.stalledTicks > 24) {
       tank.aiMemory.searchTurnDirection = tank.aiMemory.searchTurnDirection === 1 ? -1 : 1;
       tank.aiMemory.stalledTicks = Math.max(tank.aiMemory.stalledTicks - 8, 0);
+      tank.aiMemory.roamTarget = null;
       tank.decisionTicksRemaining = 0;
     }
 
     if (tank.isManual) {
       tank.intent = resolveManualIntent(tank, session.tick - 1);
     } else if (tank.bot) {
-      const enemy = session.tanks.find((candidate) => candidate.id !== tank.id)!;
-      const sensors = computeSensors(tank, enemy, session.map, session.bullets);
+      const activeReverseBurstGoal = tank.bot.goals.find((goal) => (
+        goal.id === tank.aiMemory.activeGoalId
+        && goal.movementProfile.engagementDrive === "reverseBurst"
+      ));
+      const needsDecision = tank.decisionTicksRemaining <= 0
+        || tank.aiMemory.ticksSinceLastHit === 0
+        || tank.stuckTimer >= 8
+        || tank.aiMemory.stalledTicks > 24
+        || Boolean(activeReverseBurstGoal)
+        || tank.aiMemory.reverseBurstTicksRemaining > 0
+        || tank.aiMemory.reverseHoldTicksRemaining > 0;
 
-      if (tank.decisionTicksRemaining <= 0) {
+      if (needsDecision) {
+        const enemy = session.tanks.find((candidate) => candidate.id !== tank.id)!;
+        const sensors = computeSensors(tank, enemy, session.map, session.bullets);
+        const forceReplan = Boolean(tank.bot.tactics || tank.bot.openings?.length) && (
+          ((tank.bot.commitment?.replanOnSightChange ?? true) && sensors.enemyVisible !== tank.aiMemory.lastEnemyVisible)
+          || ((tank.bot.commitment?.replanOnHit ?? true) && tank.aiMemory.ticksSinceLastHit === 0)
+          || ((tank.bot.commitment?.replanOnStuck ?? true) && (tank.stuckTimer >= 8 || sensors.stalled))
+        );
+
+        if (forceReplan) {
+          tank.decisionTicksRemaining = 0;
+        }
+
         const choice = chooseIntent(tank.bot, sensors, tank.aiMemory, session.rng);
         tank.intent = choice.intent;
         if (tank.aiMemory.activeGoalId === choice.goalId) {
@@ -757,7 +1275,7 @@ export function stepBattleSession(session: BattleSession): MatchSnapshot {
 
     if (tank.intent.fire && tank.cooldownTicks === 0) {
       session.bullets.push(createBullet(tank, session.tick));
-      tank.cooldownTicks = FIRE_COOLDOWN_TICKS;
+      tank.cooldownTicks = tank.resolvedStats.shotCooldownTicks;
     }
   }
 
@@ -823,8 +1341,12 @@ export function stepBattleSession(session: BattleSession): MatchSnapshot {
       if (hitTank.health <= 0) {
         hitTank.eliminatedAtTick = session.tick;
       }
+      hitTank.aiMemory.ticksSinceLastHit = 0;
       hitTank.aiMemory.searchTurnDirection = hitTank.aiMemory.searchTurnDirection === 1 ? -1 : 1;
+      hitTank.aiMemory.roamTarget = null;
       hitTank.aiMemory.stalledTicks = 0;
+      hitTank.decisionTicksRemaining = 0;
+      session.effects.push(createTankHitEffect(session.tick, hitTank));
       session.bullets.splice(index, 1);
     }
   }
@@ -882,10 +1404,12 @@ export function createInitialTankState(params: {
   position: Vector2;
   rotation: number;
   isManual: boolean;
+  stats?: BotStats;
   bot?: TankState["bot"];
   manualScript?: TankState["manualScript"];
 }): TankState {
   const initialTurnDirection = Array.from(params.id).reduce((sum, character) => sum + character.charCodeAt(0), 0) % 2 === 0 ? -1 : 1;
+  const baseStats = { ...resolveBaseStats(params.stats ?? params.bot?.stats) };
 
   return {
     id: params.id,
@@ -893,6 +1417,8 @@ export function createInitialTankState(params: {
     position: params.position,
     lastPosition: { ...params.position },
     rotation: params.rotation,
+    baseStats,
+    resolvedStats: resolveTankStats(baseStats),
     health: TANK_MAX_HEALTH,
     cooldownTicks: 0,
     intent: defaultIntent(),
@@ -901,12 +1427,25 @@ export function createInitialTankState(params: {
     aiMemory: {
       activeGoalId: null,
       activeGoalTicks: 0,
+      activeTacticId: null,
+      activeTacticTicks: 0,
+      lastCompletedTacticId: null,
       stalledTicks: 0,
       previousEnemyDistance: null,
       lastSeenEnemyPosition: null,
       lastSeenEnemyVelocity: zeroVector(),
       ticksSinceEnemySeen: 999,
-      searchTurnDirection: initialTurnDirection
+      searchTurnDirection: initialTurnDirection,
+      preferredFlankDirection: initialTurnDirection,
+      openingChoice: null,
+      openingTicksRemaining: 0,
+      roamTarget: null,
+      ticksSinceLastHit: 999,
+      lastEnemyVisible: false,
+      reverseBurstTicksRemaining: 0,
+      reverseHoldTicksRemaining: 0,
+      reverseEscapeUnsafeTicks: 0,
+      tacticCooldowns: emptyTacticCooldowns()
     },
     isManual: params.isManual,
     bot: params.bot,

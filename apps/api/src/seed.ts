@@ -6,8 +6,91 @@ const systemBots: BotDefinition[] = [
   botDefinitionExample,
   {
     name: "Ricochet Lynx",
-    version: "2.1.0",
+    version: "4.0.0",
     author: "System",
+    stats: {
+      forwardSpeed: 78,
+      reverseSpeed: 42,
+      rotationSpeed: 56,
+      fireRate: 64,
+      bulletSpeed: 60
+    },
+    openings: [
+      { kind: "fastScout", weight: 2.1 },
+      { kind: "centerProbe", weight: 1.8 },
+      { kind: "wideFlankRight", weight: 1.4 }
+    ],
+    tactics: {
+      roam: {
+        weight: 1.1,
+        thresholds: {
+          enemyVisible: false,
+          minTicksSinceEnemySeen: 16
+        }
+      },
+      investigateLastSeen: {
+        weight: 1.5,
+        thresholds: {
+          enemyVisible: false,
+          maxTicksSinceEnemySeen: 90
+        }
+      },
+      takeCover: {
+        weight: 0.7,
+        thresholds: {
+          enemyVisible: true,
+          minExposure: 0.5
+        }
+      },
+      peekShot: {
+        weight: 1.7,
+        thresholds: {
+          minCoverScore: 0.15,
+          minBankShotOpportunity: 0.2
+        }
+      },
+      flank: {
+        weight: 1.9,
+        preferredSide: "right",
+        thresholds: {
+          minFlankOpportunity: 0.24,
+          maxTicksSinceEnemySeen: 48
+        }
+      },
+      pressure: {
+        weight: 2.3,
+        thresholds: {
+          minHealthRatio: 0.45
+        }
+      },
+      retreat: {
+        weight: 0.8,
+        thresholds: {
+          enemyVisible: true,
+          maxHealthRatio: 0.48
+        }
+      },
+      baitShot: {
+        weight: 0.7,
+        thresholds: {
+          enemyVisible: true,
+          minCoverScore: 0.12
+        }
+      }
+    },
+    commitment: {
+      minPlanTicks: 14,
+      maxPlanTicks: 56,
+      cooldownTicks: 12,
+      replanOnSightChange: true,
+      replanOnHit: true,
+      replanOnStuck: true
+    },
+    variance: {
+      planJitter: 0.22,
+      rerollChance: 0.14,
+      openingMix: 0.74
+    },
     goals: [
       {
         id: "sweep-hunt",
@@ -21,13 +104,16 @@ const systemBots: BotDefinition[] = [
         thresholds: {
           enemyVisible: false
         },
-        movementProfile: {
-          preferredRange: "medium",
-          throttleBias: 1,
-          turnBias: 0.45,
-          orbitBias: 0.15,
-          dodgeBias: 0.05
-        },
+      movementProfile: {
+        preferredRange: "medium",
+        throttleBias: 1,
+        turnBias: 0.45,
+        orbitBias: 0.15,
+        dodgeBias: 0.05,
+        engagementDrive: "default",
+        reverseBurstTicks: 12,
+        reverseHoldTicks: 4
+      },
         firePolicy: {
           requiresEnemyVisible: true,
           minUtilityToFire: 100,
@@ -53,13 +139,16 @@ const systemBots: BotDefinition[] = [
           cooldownReady: true,
           enemyBearingAbsLte: Math.PI / 2
         },
-        movementProfile: {
-          preferredRange: "medium",
-          throttleBias: 0.15,
-          turnBias: 0.45,
-          orbitBias: 0,
-          dodgeBias: 0.05
-        },
+      movementProfile: {
+        preferredRange: "medium",
+        throttleBias: 0.15,
+        turnBias: 0.45,
+        orbitBias: 0,
+        dodgeBias: 0.05,
+        engagementDrive: "default",
+        reverseBurstTicks: 12,
+        reverseHoldTicks: 4
+      },
         firePolicy: {
           requiresEnemyVisible: true,
           minUtilityToFire: 93,
@@ -84,13 +173,16 @@ const systemBots: BotDefinition[] = [
         thresholds: {
           enemyVisible: true
         },
-        movementProfile: {
-          preferredRange: "near",
-          throttleBias: 1,
-          turnBias: 0.2,
-          orbitBias: -0.15,
-          dodgeBias: 0.05
-        },
+      movementProfile: {
+        preferredRange: "near",
+        throttleBias: 1,
+        turnBias: 0.2,
+        orbitBias: -0.15,
+        dodgeBias: 0.05,
+        engagementDrive: "default",
+        reverseBurstTicks: 12,
+        reverseHoldTicks: 4
+      },
         firePolicy: {
           requiresEnemyVisible: true,
           minUtilityToFire: 82,
@@ -112,13 +204,16 @@ const systemBots: BotDefinition[] = [
         thresholds: {
           stuckTimerGte: 8
         },
-        movementProfile: {
-          preferredRange: "far",
-          throttleBias: -1,
-          turnBias: 0.9,
-          orbitBias: 0.8,
-          dodgeBias: 0
-        },
+      movementProfile: {
+        preferredRange: "far",
+        throttleBias: -1,
+        turnBias: 0.9,
+        orbitBias: 0.8,
+        dodgeBias: 0,
+        engagementDrive: "default",
+        reverseBurstTicks: 12,
+        reverseHoldTicks: 4
+      },
         firePolicy: {
           requiresEnemyVisible: false,
           minUtilityToFire: 100,

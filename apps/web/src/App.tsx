@@ -1,24 +1,51 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   botDefinitionExample,
+  type BattleSession,
   createBattleSession,
   createInitialTankState,
+  defaultBotStats,
   fixedMaps,
   getBattleSnapshot,
   stepBattleSession,
+  TANK_STAT_BUDGET,
+  tankStatKeys,
+  totalBotStats,
+  type BotStats,
   type MatchResult,
   type MatchSnapshot
 } from "@tank-bot-battle/shared";
 import { BrowserRouter, Navigate, NavLink, Route, Routes, useNavigate } from "react-router-dom";
 import { ArenaCanvas } from "./components/ArenaCanvas";
 import { api } from "./lib/api";
+import { resolveBattlefieldTickInterval } from "./lib/battlefieldSpeed";
 import { simulateSandbox, type SandboxScriptSegment } from "./lib/sandbox";
-import type { AuthUser, BotRecord, MapRecord, MatchRecord, ReplayRecord } from "./types";
+import type {
+  AuthUser,
+  BattleOutcome,
+  BattlefieldMode,
+  BotRecord,
+  LastLiveMatchConfig,
+  MapRecord,
+  MatchRecord,
+  ReplayRecord,
+  ReplaySpeed
+} from "./types";
 
 const authDefaults = {
   username: "",
   email: "",
   password: ""
+};
+
+const replaySpeeds: ReplaySpeed[] = [0.25, 0.5, 1, 2, 4];
+
+type ActiveLiveBattleContext = {
+  token: string;
+  leftBot: BotRecord;
+  rightBot: BotRecord;
+  mapId: string;
+  mapName: string;
 };
 
 type LandingPageProps = {
@@ -61,11 +88,21 @@ type MatchmakingPageProps = {
 type BattlefieldStagePageProps = {
   replay: ReplayRecord | null;
   liveFrame: MatchSnapshot | null;
-  battleRunning: boolean;
+  battlefieldMode: BattlefieldMode;
+  outcome: BattleOutcome | null;
   status: string;
   mapName: string;
   mapId: string;
-  onReturn: () => void;
+  liveSpeed: ReplaySpeed;
+  replaySpeed: ReplaySpeed;
+  replayPlaybackToken: number;
+  onReplayStart: () => void;
+  showPlayAgain: boolean;
+  onPlayAgain: () => void;
+  onLiveSpeedChange: (speed: ReplaySpeed) => void;
+  onReplaySpeedChange: (speed: ReplaySpeed) => void;
+  onPlaybackComplete: () => void;
+  onExit: () => void;
   onSignOut: () => void;
 };
 
@@ -93,15 +130,46 @@ function fallbackMaps(): MapRecord[] {
   }));
 }
 
+const statLabels: Record<keyof BotStats, string> = {
+  forwardSpeed: "Forward",
+  reverseSpeed: "Reverse",
+  rotationSpeed: "Turn",
+  fireRate: "Fire Rate",
+  bulletSpeed: "Bullet Speed"
+};
+
+const statShortLabels: Record<keyof BotStats, string> = {
+  forwardSpeed: "FWD",
+  reverseSpeed: "REV",
+  rotationSpeed: "TURN",
+  fireRate: "FIRE",
+  bulletSpeed: "SHOT"
+};
+
+function hasValidStats(value: unknown): value is BotStats {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Record<string, unknown>;
+  return tankStatKeys.every((key) => {
+    const stat = candidate[key];
+    return Number.isInteger(stat) && Number(stat) >= 0 && Number(stat) <= 100;
+  }) && totalBotStats(candidate as BotStats) === TANK_STAT_BUDGET;
+}
+
 function normalizeBotDefinition(bot: BotRecord): BotRecord["definition"] {
   const definition = bot.definition as BotRecord["definition"] & {
+    stats?: BotStats;
     goals?: Array<{ type?: string }>;
     rules?: unknown[];
   };
+  const stats = hasValidStats(definition?.stats) ? definition.stats : defaultBotStats;
 
   if (Array.isArray(definition?.goals)) {
     return {
       ...definition,
+      stats,
       goals: definition.goals
     };
   }
@@ -110,6 +178,7 @@ function normalizeBotDefinition(bot: BotRecord): BotRecord["definition"] {
     name: definition?.name ?? bot.name,
     version: definition?.version ?? bot.version,
     author: definition?.author ?? bot.author,
+    stats,
     goals: []
   };
 }
@@ -141,6 +210,138 @@ function botGoalTags(bot: BotRecord): string[] {
   }
 
   return definition.goals.slice(0, 3).map((goal) => goal.type);
+}
+
+function botStats(bot: BotRecord): BotStats {
+  return normalizeBotDefinition(bot).stats;
+}
+
+function botStatTotal(bot: BotRecord): number {
+  return totalBotStats(botStats(bot));
+}
+
+function botStatRows(bot: BotRecord): Array<{ key: keyof BotStats; label: string; shortLabel: string; value: number }> {
+  const stats = botStats(bot);
+  return tankStatKeys.map((key) => ({
+    key,
+    label: statLabels[key],
+    shortLabel: statShortLabels[key],
+    value: stats[key]
+  }));
+}
+
+function BotStatSummary({ bot, compact = false }: { bot: BotRecord; compact?: boolean }): React.ReactElement {
+  const rows = botStatRows(bot);
+  const total = botStatTotal(bot);
+
+  if (compact) {
+    return (
+      <div className="bot-stat-chip-row">
+        {rows.map((row) => (
+          <span key={`${bot.id}-${row.key}`} className="stat-chip">
+            <span>{row.shortLabel}</span>
+            <strong>{row.value}</strong>
+          </span>
+        ))}
+        <span className="stat-chip budget-chip">{total} / {TANK_STAT_BUDGET}</span>
+      </div>
+    );
+  }
+
+  return (
+    <div className="bot-stat-panel">
+      <div className="bot-stat-budget">
+        <span className="choice-tag">Stats</span>
+        <strong>{total} / {TANK_STAT_BUDGET}</strong>
+      </div>
+      <div className="bot-stat-grid">
+        {rows.map((row) => (
+          <div key={`${bot.id}-${row.key}`} className="bot-stat-row">
+            <div className="bot-stat-line">
+              <span>{row.label}</span>
+              <strong>{row.value}</strong>
+            </div>
+            <div className="bot-stat-track" aria-hidden="true">
+              <span className="bot-stat-fill" style={{ width: `${row.value}%` }} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function formatReason(reason: string): string {
+  if (reason === "draw") {
+    return "Draw";
+  }
+
+  if (reason === "timeout") {
+    return "Timeout";
+  }
+
+  return "Elimination";
+}
+
+function resolveWinnerName(input: {
+  winnerTankId: string | null;
+  leftTankId?: string;
+  leftTankName: string;
+  rightTankId?: string;
+  rightTankName: string;
+}): string | null {
+  if (!input.winnerTankId || input.winnerTankId === "draw") {
+    return null;
+  }
+
+  if (input.winnerTankId === "left" || input.winnerTankId === input.leftTankId) {
+    return input.leftTankName;
+  }
+
+  if (input.winnerTankId === "right" || input.winnerTankId === input.rightTankId) {
+    return input.rightTankName;
+  }
+
+  return null;
+}
+
+function buildBattleOutcome(input: {
+  winnerTankId: string | null;
+  leftTankId?: string;
+  leftTankName: string;
+  rightTankId?: string;
+  rightTankName: string;
+  reason: string;
+  totalTicks: number;
+  mapId: string;
+  source: BattleOutcome["source"];
+}): BattleOutcome {
+  return {
+    winnerTankId: input.winnerTankId,
+    winnerName: resolveWinnerName(input),
+    leftTankName: input.leftTankName,
+    rightTankName: input.rightTankName,
+    reason: input.reason,
+    totalTicks: input.totalTicks,
+    mapId: input.mapId,
+    source: input.source
+  };
+}
+
+function outcomeHeading(outcome: BattleOutcome | null): string {
+  if (!outcome) {
+    return "Battlefield";
+  }
+
+  return outcome.winnerName ? `${outcome.winnerName} Wins` : "Draw";
+}
+
+function outcomeDetail(outcome: BattleOutcome | null): string {
+  if (!outcome) {
+    return "";
+  }
+
+  return `${formatReason(outcome.reason)} after ${outcome.totalTicks} ticks`;
 }
 
 function LoadingScreen(): React.ReactElement {
@@ -241,6 +442,7 @@ function LandingPage({
                   <span key={`${bot.id}-${tag}`} className="mini-tag">{tag}</span>
                 ))}
               </div>
+              <BotStatSummary bot={bot} compact />
             </article>
           )) : <p className="empty-copy">System roster is loading.</p>}
         </div>
@@ -341,6 +543,7 @@ function BotChoiceColumn({
                 <span className="choice-tag">System</span>
                 <strong>{bot.name}</strong>
                 <span>{describeBot(bot)}</span>
+                <BotStatSummary bot={bot} />
               </button>
             ))}
           </div>
@@ -360,6 +563,7 @@ function BotChoiceColumn({
                   <span className="choice-tag">Custom</span>
                   <strong>{bot.name}</strong>
                   <span>{describeBot(bot)}</span>
+                  <BotStatSummary bot={bot} />
                 </button>
               ))}
             </div>
@@ -421,6 +625,7 @@ function MatchmakingPage({
               <span key={`left-${tag}`} className="mini-tag">{tag}</span>
             )) : <span className="mini-tag">awaiting pilot</span>}
           </div>
+          {leftBot ? <BotStatSummary bot={leftBot} /> : null}
         </article>
 
         <article className="versus-core">
@@ -445,6 +650,7 @@ function MatchmakingPage({
               <span key={`right-${tag}`} className="mini-tag">{tag}</span>
             )) : <span className="mini-tag">awaiting rival</span>}
           </div>
+          {rightBot ? <BotStatSummary bot={rightBot} /> : null}
         </article>
       </section>
 
@@ -508,34 +714,124 @@ function MatchmakingPage({
   );
 }
 
-function BattlefieldStagePage({
+export function BattlefieldStagePage({
   replay,
   liveFrame,
-  battleRunning,
+  battlefieldMode,
+  outcome,
   status,
   mapName,
   mapId,
-  onReturn,
+  liveSpeed,
+  replaySpeed,
+  replayPlaybackToken,
+  onReplayStart,
+  showPlayAgain,
+  onPlayAgain,
+  onLiveSpeedChange,
+  onReplaySpeedChange,
+  onPlaybackComplete,
+  onExit,
   onSignOut
 }: BattlefieldStagePageProps): React.ReactElement {
-  const frames = battleRunning && liveFrame
-    ? [liveFrame]
-    : (replay?.replay ?? (liveFrame ? [liveFrame] : []));
+  const replayFrames = replay?.replay ?? [];
+  const frames = battlefieldMode === "live"
+    ? (liveFrame ? [liveFrame] : [])
+    : (replayFrames.length > 0 ? replayFrames : (liveFrame ? [liveFrame] : []));
+  const replayTheme = battlefieldMode === "replay" || battlefieldMode === "replayComplete";
+  const fixedFrameIndex = battlefieldMode === "replay" ? undefined : Math.max(frames.length - 1, 0);
+  const showOutcomeCard = battlefieldMode === "result" || battlefieldMode === "replayComplete";
+  const replayActionLabel = battlefieldMode === "replayComplete" ? "Replay Again" : "Replay";
+  const headerLabel = battlefieldMode === "live"
+    ? "Live battle"
+    : battlefieldMode === "result"
+      ? "Battle result"
+      : battlefieldMode === "replay"
+        ? "Replay broadcast"
+        : "Replay complete";
 
   return (
-    <main className="battle-stage-shell">
-      <div className="battle-overlay">
-        <button className="ghost-button" onClick={onReturn}>Back to matchmaking</button>
+    <main className={replayTheme ? "battle-stage-shell replay-shell" : "battle-stage-shell"}>
+      <div className={replayTheme ? "battle-overlay replay-overlay" : "battle-overlay"}>
+        {showOutcomeCard
+          ? <div className="overlay-spacer" aria-hidden="true" />
+          : <button className="ghost-button" onClick={onExit}>Exit to matchmaking</button>}
         <div className="battle-overlay-copy">
-          <p className="eyebrow">{battleRunning ? "Live battle" : "Replay view"}</p>
+          <p className="eyebrow">{headerLabel}</p>
           <h1>{mapName}</h1>
           <p className="status-line">{status}</p>
         </div>
         <button className="ghost-button" onClick={onSignOut}>Sign out</button>
       </div>
 
-      <section className="battle-stage">
-        <ArenaCanvas replay={frames} mapId={mapId} autoplay={!battleRunning} />
+      <section className={replayTheme ? "battle-stage replay-stage" : "battle-stage"}>
+        <div className={replayTheme ? "battlefield-frame replay-frame" : "battlefield-frame"}>
+          <ArenaCanvas
+            replay={frames}
+            mapId={mapId}
+            mode={battlefieldMode === "live" ? "live" : "replay"}
+            theme={replayTheme ? "replay" : "live"}
+            isPlaying={battlefieldMode === "replay"}
+            playbackSpeed={replaySpeed}
+            playbackToken={replayPlaybackToken}
+            fixedFrameIndex={fixedFrameIndex}
+            onPlaybackComplete={onPlaybackComplete}
+          />
+
+          {showOutcomeCard ? (
+            <div className="battle-state-layer">
+              <article className="battle-state-card">
+                <p className="eyebrow">{battlefieldMode === "replayComplete" ? "Replay complete" : "Winner"}</p>
+                <h2>{outcomeHeading(outcome)}</h2>
+                <p className="battle-state-detail">{outcomeDetail(outcome)}</p>
+                <p className="status-line">{status}</p>
+                <div className="battle-state-actions">
+                  <button className="ghost-button" type="button" onClick={onExit}>Exit to Matchmaking</button>
+                  <button className="ghost-button" type="button" onClick={onReplayStart}>{replayActionLabel}</button>
+                  {showPlayAgain ? (
+                    <button className="primary-button" type="button" onClick={onPlayAgain}>Play Again</button>
+                  ) : null}
+                </div>
+              </article>
+            </div>
+          ) : null}
+        </div>
+
+        {battlefieldMode === "live" ? (
+          <div className="replay-control-bar" role="toolbar" aria-label="Live speed controls">
+            <span className="field-chip">Live speed</span>
+            <div className="replay-speed-buttons">
+              {replaySpeeds.map((speed) => (
+                <button
+                  key={speed}
+                  type="button"
+                  className={liveSpeed === speed ? "tab active" : "tab"}
+                  onClick={() => onLiveSpeedChange(speed)}
+                >
+                  {speed}x
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
+
+        {battlefieldMode === "replay" ? (
+          <div className="replay-control-bar" role="toolbar" aria-label="Replay speed controls">
+            <span className="field-chip replay-chip">Replay mode</span>
+            <div className="replay-speed-buttons">
+              {replaySpeeds.map((speed) => (
+                <button
+                  key={speed}
+                  type="button"
+                  className={replaySpeed === speed ? "tab active" : "tab"}
+                  onClick={() => onReplaySpeedChange(speed)}
+                >
+                  {speed}x
+                </button>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </section>
     </main>
   );
@@ -571,6 +867,7 @@ function BotLabPage({
           <button className="ghost-button" onClick={() => void onValidate()}>Validate</button>
           <button className="primary-button" onClick={() => void onSave()}>Save bot</button>
         </div>
+        <p className="status-line">Every bot must include all five core stats and total exactly {TANK_STAT_BUDGET} points.</p>
         <textarea aria-label="Bot JSON editor" value={botJson} onChange={(event) => onBotJsonChange(event.target.value)} />
         {validationError ? <p className="error-line">{validationError}</p> : null}
       </article>
@@ -615,7 +912,7 @@ function BotLabPage({
             Turn right
           </button>
         </div>
-        <ArenaCanvas replay={sandboxReplay} mapId={mapId} />
+        <ArenaCanvas replay={sandboxReplay} mapId={mapId} mode="replay" fixedFrameIndex={Math.max(sandboxReplay.length - 1, 0)} />
       </article>
     </section>
   );
@@ -624,6 +921,8 @@ function BotLabPage({
 function AppRoutes(): React.ReactElement {
   const navigate = useNavigate();
   const battleTimerRef = useRef<number | null>(null);
+  const liveSessionRef = useRef<BattleSession | null>(null);
+  const liveBattleContextRef = useRef<ActiveLiveBattleContext | null>(null);
   const [token, setToken] = useState<string | null>(() => window.localStorage.getItem("tank-token"));
   const [user, setUser] = useState<AuthUser | null>(null);
   const [authLoading, setAuthLoading] = useState(Boolean(window.localStorage.getItem("tank-token")));
@@ -644,6 +943,12 @@ function AppRoutes(): React.ReactElement {
   const [selectedReplay, setSelectedReplay] = useState<ReplayRecord | null>(null);
   const [liveFrame, setLiveFrame] = useState<MatchSnapshot | null>(null);
   const [battleRunning, setBattleRunning] = useState(false);
+  const [battlefieldMode, setBattlefieldMode] = useState<BattlefieldMode | null>(null);
+  const [battleOutcome, setBattleOutcome] = useState<BattleOutcome | null>(null);
+  const [lastLiveMatchConfig, setLastLiveMatchConfig] = useState<LastLiveMatchConfig | null>(null);
+  const [liveSpeed, setLiveSpeed] = useState<ReplaySpeed>(1);
+  const [replaySpeed, setReplaySpeed] = useState<ReplaySpeed>(1);
+  const [replayPlaybackToken, setReplayPlaybackToken] = useState(0);
   const [sandboxReplay, setSandboxReplay] = useState<MatchSnapshot[]>([]);
 
   const availableMaps = useMemo(() => maps.length > 0 ? maps : fallbackMaps(), [maps]);
@@ -665,13 +970,90 @@ function AppRoutes(): React.ReactElement {
   );
   const sandboxMapId = availableMaps[0]?.id ?? fixedMaps[0].id;
   const isAuthenticated = Boolean(token && user);
-  const hasBattleView = battleRunning || Boolean(selectedReplay) || Boolean(liveFrame);
+  const hasBattleView = battlefieldMode !== null && (Boolean(selectedReplay) || Boolean(liveFrame));
 
   useEffect(() => () => {
     if (battleTimerRef.current !== null) {
       window.clearInterval(battleTimerRef.current);
     }
+    liveSessionRef.current = null;
+    liveBattleContextRef.current = null;
   }, []);
+
+  useEffect(() => {
+    if (!battleRunning || battlefieldMode !== "live") {
+      if (battleTimerRef.current !== null) {
+        window.clearInterval(battleTimerRef.current);
+        battleTimerRef.current = null;
+      }
+      return;
+    }
+
+    if (!liveSessionRef.current || !liveBattleContextRef.current) {
+      return;
+    }
+
+    if (battleTimerRef.current !== null) {
+      window.clearInterval(battleTimerRef.current);
+    }
+
+    battleTimerRef.current = window.setInterval(() => {
+      const session = liveSessionRef.current;
+      const context = liveBattleContextRef.current;
+      if (!session || !context) {
+        if (battleTimerRef.current !== null) {
+          window.clearInterval(battleTimerRef.current);
+          battleTimerRef.current = null;
+        }
+        return;
+      }
+
+      const latestSnapshot = stepBattleSession(session);
+      setLiveFrame(latestSnapshot);
+
+      if (!session.completed) {
+        return;
+      }
+
+      if (battleTimerRef.current !== null) {
+        window.clearInterval(battleTimerRef.current);
+        battleTimerRef.current = null;
+      }
+
+      liveSessionRef.current = null;
+      liveBattleContextRef.current = null;
+
+      const result = session.result!;
+      setBattleRunning(false);
+      setSelectedReplay({
+        id: "live-local",
+        replay: result.replay
+      });
+      setLiveFrame(result.finalState);
+      setBattleOutcome(buildBattleOutcome({
+        winnerTankId: result.winnerTankId,
+        leftTankName: context.leftBot.name,
+        rightTankName: context.rightBot.name,
+        reason: result.reason,
+        totalTicks: result.totalTicks,
+        mapId: context.mapId,
+        source: "liveResult"
+      }));
+      setBattlefieldMode("result");
+      setStatus("Battle finished. Review the result, launch the replay, or start a rematch.");
+
+      void persistClientMatch(context.token, context.leftBot, context.rightBot, context.mapId, result)
+        .then(() => setStatus("Battle saved. Press Replay to review it or Play Again to run the same matchup live."))
+        .catch((error: Error) => setStatus(`Battle finished locally but failed to save: ${error.message}`));
+    }, resolveBattlefieldTickInterval(liveSpeed));
+
+    return () => {
+      if (battleTimerRef.current !== null) {
+        window.clearInterval(battleTimerRef.current);
+        battleTimerRef.current = null;
+      }
+    };
+  }, [battleRunning, battlefieldMode, liveSpeed]);
 
   useEffect(() => {
     if (token) {
@@ -817,14 +1199,49 @@ function AppRoutes(): React.ReactElement {
     await refreshProtectedData(nextToken);
   }
 
-  async function handleRunMatch(): Promise<void> {
-    if (!token || !leftBotId || !rightBotId || !selectedMapId) {
+  function clearBattlefieldState(): void {
+    if (battleTimerRef.current !== null) {
+      window.clearInterval(battleTimerRef.current);
+      battleTimerRef.current = null;
+    }
+
+    liveSessionRef.current = null;
+    liveBattleContextRef.current = null;
+    setBattleRunning(false);
+    setBattlefieldMode(null);
+    setBattleOutcome(null);
+    setSelectedReplay(null);
+    setLiveFrame(null);
+    setActiveBattleMapId("");
+    setLastLiveMatchConfig(null);
+    setLiveSpeed(1);
+    setReplaySpeed(1);
+    setReplayPlaybackToken(0);
+  }
+
+  function startReplayPlayback(): void {
+    if (!selectedReplay || selectedReplay.replay.length === 0) {
       return;
     }
 
-    const leftBot = bots.find((bot) => bot.id === leftBotId);
-    const rightBot = bots.find((bot) => bot.id === rightBotId);
-    const battleMap = fixedMaps.find((map) => map.id === selectedMapId);
+    setBattlefieldMode("replay");
+    setReplaySpeed(1);
+    setReplayPlaybackToken((current) => current + 1);
+    setStatus(
+      battleOutcome?.source === "savedReplay"
+        ? "Replay broadcast started."
+        : "Replay started from the finished battle."
+    );
+  }
+
+  async function runLiveMatch(config: LastLiveMatchConfig): Promise<void> {
+    if (!token || !config.leftBotId || !config.rightBotId || !config.mapId) {
+      return;
+    }
+
+    const leftBot = bots.find((bot) => bot.id === config.leftBotId);
+    const rightBot = bots.find((bot) => bot.id === config.rightBotId);
+    const battleMap = fixedMaps.find((map) => map.id === config.mapId);
 
     if (!leftBot || !rightBot || !battleMap) {
       setStatus("Select valid bots and a valid map before starting a battle.");
@@ -835,6 +1252,9 @@ function AppRoutes(): React.ReactElement {
       window.clearInterval(battleTimerRef.current);
       battleTimerRef.current = null;
     }
+
+    liveSessionRef.current = null;
+    liveBattleContextRef.current = null;
 
     const leftDefinition = normalizeBotDefinition(leftBot);
     const rightDefinition = normalizeBotDefinition(rightBot);
@@ -863,55 +1283,54 @@ function AppRoutes(): React.ReactElement {
     });
 
     const legacyBotSelected = !Array.isArray((leftBot.definition as { goals?: unknown[] } | undefined)?.goals)
-      || !Array.isArray((rightBot.definition as { goals?: unknown[] } | undefined)?.goals);
+      || !Array.isArray((rightBot.definition as { goals?: unknown[] } | undefined)?.goals)
+      || !hasValidStats((leftBot.definition as { stats?: unknown } | undefined)?.stats)
+      || !hasValidStats((rightBot.definition as { stats?: unknown } | undefined)?.stats);
 
     const initialSnapshot = getBattleSnapshot(session);
     session.replay.push(initialSnapshot);
+    liveSessionRef.current = session;
+    liveBattleContextRef.current = {
+      token,
+      leftBot,
+      rightBot,
+      mapId: battleMap.id,
+      mapName: battleMap.name
+    };
+    setLeftBotId(leftBot.id);
+    setRightBotId(rightBot.id);
+    setSelectedMapId(battleMap.id);
+    setLastLiveMatchConfig({
+      leftBotId: leftBot.id,
+      rightBotId: rightBot.id,
+      mapId: battleMap.id
+    });
     setSelectedReplay(null);
+    setBattleOutcome(null);
     setLiveFrame(initialSnapshot);
     setBattleRunning(true);
+    setBattlefieldMode("live");
     setActiveBattleMapId(battleMap.id);
+    setLiveSpeed(1);
+    setReplaySpeed(1);
     setStatus(
       legacyBotSelected
-        ? `Live battle started on ${battleMap.name}. Legacy bot definitions were loaded as idle until they are re-saved in Bot Lab.`
+        ? `Live battle started on ${battleMap.name}. Legacy bot definitions were loaded with fallback baseline stats until they are re-saved in Bot Lab.`
         : `Live battle started: ${leftBot.name} vs ${rightBot.name} on ${battleMap.name}`
     );
     navigate("/battlefield");
+  }
 
-    battleTimerRef.current = window.setInterval(() => {
-      let latestSnapshot = initialSnapshot;
+  async function handleRunMatch(): Promise<void> {
+    if (!token || !leftBotId || !rightBotId || !selectedMapId) {
+      return;
+    }
 
-      for (let step = 0; step < 2; step += 1) {
-        latestSnapshot = stepBattleSession(session);
-        if (session.completed) {
-          break;
-        }
-      }
-
-      setLiveFrame(latestSnapshot);
-
-      if (!session.completed) {
-        return;
-      }
-
-      if (battleTimerRef.current !== null) {
-        window.clearInterval(battleTimerRef.current);
-        battleTimerRef.current = null;
-      }
-
-      const result = session.result!;
-      setBattleRunning(false);
-      setSelectedReplay({
-        id: "live-local",
-        replay: result.replay
-      });
-      setLiveFrame(result.finalState);
-      setStatus(`Battle finished: ${result.reason} after ${result.totalTicks} ticks.`);
-
-      void persistClientMatch(token, leftBot, rightBot, battleMap.id, result)
-        .then(() => setStatus(`Battle saved: ${result.reason} after ${result.totalTicks} ticks.`))
-        .catch((error: Error) => setStatus(`Battle finished locally but failed to save: ${error.message}`));
-    }, 33);
+    await runLiveMatch({
+      leftBotId,
+      rightBotId,
+      mapId: selectedMapId
+    });
   }
 
   async function handleOpenReplay(matchId: string): Promise<void> {
@@ -924,13 +1343,29 @@ function AppRoutes(): React.ReactElement {
       battleTimerRef.current = null;
     }
 
+    liveSessionRef.current = null;
+    liveBattleContextRef.current = null;
     const match = matches.find((candidate) => candidate.id === matchId);
     const replay = await api.getReplay(token, matchId);
     setBattleRunning(false);
     setLiveFrame(null);
     setSelectedReplay(replay);
     setActiveBattleMapId(match?.mapId ?? selectedMapId);
-    setStatus(`Loaded replay: ${match?.reason ?? "Saved match"}`);
+    setBattleOutcome(buildBattleOutcome({
+      winnerTankId: match?.winnerTankId ?? null,
+      leftTankId: match?.leftBotId,
+      leftTankName: bots.find((bot) => bot.id === match?.leftBotId)?.name ?? "Left Bot",
+      rightTankId: match?.rightBotId,
+      rightTankName: bots.find((bot) => bot.id === match?.rightBotId)?.name ?? "Right Bot",
+      reason: match?.reason ?? "draw",
+      totalTicks: match?.totalTicks ?? replay.replay.length,
+      mapId: match?.mapId ?? selectedMapId,
+      source: "savedReplay"
+    }));
+    setBattlefieldMode("replay");
+    setReplaySpeed(1);
+    setReplayPlaybackToken((current) => current + 1);
+    setStatus("Replay loaded. Adjust speed at any time during playback.");
     navigate("/battlefield");
   }
 
@@ -953,21 +1388,32 @@ function AppRoutes(): React.ReactElement {
   }
 
   function handleReturnToMatchmaking(): void {
+    clearBattlefieldState();
     navigate("/matchmaking");
   }
 
-  function handleSignOut(): void {
-    if (battleTimerRef.current !== null) {
-      window.clearInterval(battleTimerRef.current);
-      battleTimerRef.current = null;
+  function handleReplayComplete(): void {
+    setBattlefieldMode("replayComplete");
+    setStatus(
+      battleOutcome?.source === "liveResult"
+        ? "Replay complete. Choose Exit, Replay Again, or Play Again."
+        : "Replay complete. Choose Exit or Replay Again."
+    );
+  }
+
+  function handlePlayAgain(): void {
+    if (!lastLiveMatchConfig) {
+      return;
     }
+
+    void runLiveMatch(lastLiveMatchConfig);
+  }
+
+  function handleSignOut(): void {
+    clearBattlefieldState();
     setToken(null);
     setUser(null);
     setAuthLoading(false);
-    setBattleRunning(false);
-    setLiveFrame(null);
-    setSelectedReplay(null);
-    setActiveBattleMapId("");
     setLandingAuthOpen(false);
     window.localStorage.removeItem("tank-token");
     navigate("/", { replace: true });
@@ -1057,11 +1503,21 @@ function AppRoutes(): React.ReactElement {
                   <BattlefieldStagePage
                     replay={selectedReplay}
                     liveFrame={liveFrame}
-                    battleRunning={battleRunning}
+                    battlefieldMode={battlefieldMode!}
+                    outcome={battleOutcome}
                     status={status}
                     mapName={activeBattleMap.name}
                     mapId={activeBattleMap.id}
-                    onReturn={handleReturnToMatchmaking}
+                    liveSpeed={liveSpeed}
+                    replaySpeed={replaySpeed}
+                    replayPlaybackToken={replayPlaybackToken}
+                    onReplayStart={startReplayPlayback}
+                    showPlayAgain={Boolean(lastLiveMatchConfig && battleOutcome?.source === "liveResult")}
+                    onPlayAgain={handlePlayAgain}
+                    onLiveSpeedChange={setLiveSpeed}
+                    onReplaySpeedChange={setReplaySpeed}
+                    onPlaybackComplete={handleReplayComplete}
+                    onExit={handleReturnToMatchmaking}
                     onSignOut={handleSignOut}
                   />
                 )

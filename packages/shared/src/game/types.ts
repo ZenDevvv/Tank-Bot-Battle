@@ -1,4 +1,4 @@
-import type { BotDefinition } from "../schema/bot.js";
+import type { BotDefinition, BotStats, TacticalBehaviorName, TacticalOpeningName } from "../schema/bot.js";
 
 export type Vector2 = {
   x: number;
@@ -33,12 +33,33 @@ export type TankIntent = {
 export type TankAiMemory = {
   activeGoalId: string | null;
   activeGoalTicks: number;
+  activeTacticId: TacticalBehaviorName | null;
+  activeTacticTicks: number;
+  lastCompletedTacticId: TacticalBehaviorName | null;
   stalledTicks: number;
   previousEnemyDistance: number | null;
   lastSeenEnemyPosition: Vector2 | null;
   lastSeenEnemyVelocity: Vector2;
   ticksSinceEnemySeen: number;
   searchTurnDirection: TankSteer;
+  preferredFlankDirection: TankSteer;
+  openingChoice: TacticalOpeningName | null;
+  openingTicksRemaining: number;
+  roamTarget: Vector2 | null;
+  ticksSinceLastHit: number;
+  lastEnemyVisible: boolean;
+  reverseBurstTicksRemaining: number;
+  reverseHoldTicksRemaining: number;
+  reverseEscapeUnsafeTicks: number;
+  tacticCooldowns: Record<TacticalBehaviorName, number>;
+};
+
+export type ResolvedTankStats = {
+  forwardSpeed: number;
+  reverseSpeed: number;
+  rotationSpeed: number;
+  shotCooldownTicks: number;
+  bulletSpeed: number;
 };
 
 export type TankState = {
@@ -47,6 +68,8 @@ export type TankState = {
   position: Vector2;
   lastPosition: Vector2;
   rotation: number;
+  baseStats: BotStats;
+  resolvedStats: ResolvedTankStats;
   health: number;
   cooldownTicks: number;
   intent: TankIntent;
@@ -68,13 +91,25 @@ export type BulletState = {
   ageTicks: number;
 };
 
-export type ImpactEffect = {
+export type BulletClashEffect = {
   id: string;
   kind: "bulletClash";
   position: Vector2;
   ageTicks: number;
   durationTicks: number;
 };
+
+export type TankHitEffect = {
+  id: string;
+  kind: "tankHit";
+  tankId: string;
+  position: Vector2;
+  remainingHealth: number;
+  ageTicks: number;
+  durationTicks: number;
+};
+
+export type ImpactEffect = BulletClashEffect | TankHitEffect;
 
 export type MatchSnapshot = {
   tick: number;
@@ -118,11 +153,27 @@ export type BotSensors = {
   bulletThreat: boolean;
   bulletThreatLevel: number;
   interceptBearing: number;
+  reverseEscapeBearing: number;
+  reverseEscapeSafety: number;
   searchBearing: number;
   hasRecentEnemyContact: boolean;
   stalled: boolean;
   ticksSinceEnemySeen: number;
   searchTurnDirection: TankSteer;
+  coverScore: number;
+  exposureScore: number;
+  routeSafety: number;
+  flankOpportunity: number;
+  bankShotOpportunity: number;
+  roamBearing: number;
+  investigateBearing: number;
+  coverBearing: number;
+  peekBearing: number;
+  flankLeftBearing: number;
+  flankRightBearing: number;
+  retreatBearing: number;
+  baitBearing: number;
+  bankShotBearing: number;
   cooldownReady: boolean;
   stuckTimer: number;
   healthRatio: number;

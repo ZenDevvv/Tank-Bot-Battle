@@ -45,6 +45,7 @@ describe("api app", () => {
 
   it("validates and stores bot definitions", async () => {
     const example = await request(app).get("/schema/bot/example").expect(200);
+    expect(example.body.stats).toEqual(botDefinitionExample.stats);
     await request(app)
       .post("/bots/validate")
       .send(example.body)
@@ -58,6 +59,23 @@ describe("api app", () => {
 
     createdBotId = create.body.id;
     expect(create.body.name).toBe(example.body.name);
+  });
+
+  it("rejects bot stats that break the 300-point budget", async () => {
+    const invalidBot = {
+      ...botDefinitionExample,
+      stats: {
+        ...botDefinitionExample.stats,
+        forwardSpeed: botDefinitionExample.stats.forwardSpeed + 1
+      }
+    };
+
+    const response = await request(app)
+      .post("/bots/validate")
+      .send(invalidBot)
+      .expect(400);
+
+    expect(response.body.message).toMatch(/300/i);
   });
 
   it("returns only system bots from the public roster endpoint", async () => {

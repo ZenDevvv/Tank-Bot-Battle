@@ -6,6 +6,10 @@
     "apps/*",
     "packages/*"
   ],
+  "dependencies": {
+    "dotenv": "^8.2.0",
+    "node-fetch": "^3.3.2"
+  },
   "scripts": {
     "build": "npm run build --workspace @tank-bot-battle/shared && npm run build --workspace @tank-bot-battle/api && npm run build --workspace @tank-bot-battle/web",
     "dev": "npm run build --workspace @tank-bot-battle/shared && npm run dev --workspace @tank-bot-battle/api",
