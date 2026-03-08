@@ -55,3 +55,9 @@ export type BattleOutcome = {
   mapId: string;
   source: "liveResult" | "savedReplay";
 };
+
+export type LastLiveMatchConfig = {
+  leftBotId: string;
+  rightBotId: string;
+  mapId: string;
+};

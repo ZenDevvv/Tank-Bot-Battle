@@ -1,6 +1,6 @@
 import { render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import App from "./App";
+import App, { BattlefieldStagePage } from "./App";
 
 const fetchMock = jest.fn();
 
@@ -13,14 +13,21 @@ const publicBots = [
   {
     id: "system-1",
     ownerId: null,
-    name: "Crossfire Fox",
-    version: "2.0.0",
+    name: "Backstep Viper",
+    version: "2.2.0",
     author: "System",
     isSystem: true,
     definition: {
-      name: "Crossfire Fox",
-      version: "2.0.0",
-      goals: [{ type: "attack" }, { type: "evade" }]
+      name: "Backstep Viper",
+      version: "4.0.0",
+      stats: {
+        forwardSpeed: 58,
+        reverseSpeed: 84,
+        rotationSpeed: 76,
+        fireRate: 46,
+        bulletSpeed: 36
+      },
+      goals: [{ type: "evade" }, { type: "lineUpShot" }]
     }
   }
 ];
@@ -36,6 +43,13 @@ const privateBots = [
     definition: {
       name: "Pilot Bot",
       version: "1.0.0",
+      stats: {
+        forwardSpeed: 60,
+        reverseSpeed: 60,
+        rotationSpeed: 60,
+        fireRate: 60,
+        bulletSpeed: 60
+      },
       goals: [{ type: "attack" }]
     }
   },
@@ -50,6 +64,49 @@ const maps = [
     height: 640,
     spawnPoints: [{ x: 0, y: 0 }, { x: 1, y: 1 }],
     walls: [{ x: 10, y: 10, width: 10, height: 10 }]
+  }
+];
+
+const replayFrames = [
+  {
+    tick: 0,
+    tanks: [
+      { id: "left", name: "Backstep Viper", position: { x: 120, y: 120 }, rotation: 0, health: 3, cooldownTicks: 0 },
+      { id: "right", name: "Ricochet Lynx", position: { x: 840, y: 520 }, rotation: Math.PI, health: 3, cooldownTicks: 0 }
+    ],
+    bullets: [],
+    effects: []
+  },
+  {
+    tick: 1,
+    tanks: [
+      { id: "left", name: "Backstep Viper", position: { x: 160, y: 160 }, rotation: 0.2, health: 3, cooldownTicks: 0 },
+      { id: "right", name: "Ricochet Lynx", position: { x: 800, y: 480 }, rotation: Math.PI - 0.2, health: 2, cooldownTicks: 0 }
+    ],
+    bullets: [],
+    effects: []
+  },
+  {
+    tick: 2,
+    tanks: [
+      { id: "left", name: "Backstep Viper", position: { x: 200, y: 190 }, rotation: 0.25, health: 3, cooldownTicks: 0 },
+      { id: "right", name: "Ricochet Lynx", position: { x: 760, y: 450 }, rotation: Math.PI - 0.25, health: 0, cooldownTicks: 0 }
+    ],
+    bullets: [],
+    effects: []
+  }
+];
+
+const savedMatches = [
+  {
+    id: "match-1",
+    leftBotId: "custom-1",
+    rightBotId: "system-1",
+    mapId: "crossfire",
+    winnerTankId: "left",
+    reason: "elimination",
+    totalTicks: 2,
+    createdAt: "2026-03-07T08:00:00.000Z"
   }
 ];
 
@@ -71,7 +128,8 @@ describe("App", () => {
 
     render(<App />);
 
-    expect(await screen.findByText(/Crossfire Fox/i)).toBeInTheDocument();
+    expect(await screen.findByText(/Backstep Viper/i)).toBeInTheDocument();
+    expect(await screen.findByText(/300 \/ 300/i)).toBeInTheDocument();
 
     await userEvent.click(screen.getByRole("button", { name: /^Start$/i }));
 
@@ -93,6 +151,7 @@ describe("App", () => {
     await userEvent.click(startButton);
 
     expect(await screen.findByText(/Lock in the duel/i)).toBeInTheDocument();
+    expect(await screen.findAllByText(/300 \/ 300/i)).not.toHaveLength(0);
   });
 
   it("redirects battlefield without active match state back to matchmaking", async () => {
@@ -117,7 +176,18 @@ describe("App", () => {
       .mockResolvedValueOnce(ok(privateBots))
       .mockResolvedValueOnce(ok([]))
       .mockResolvedValueOnce(ok(maps))
-      .mockResolvedValueOnce(ok({ name: "Sample", version: "1.0.0", goals: [] }));
+      .mockResolvedValueOnce(ok({
+        name: "Sample",
+        version: "1.0.0",
+        stats: {
+          forwardSpeed: 60,
+          reverseSpeed: 60,
+          rotationSpeed: 60,
+          fireRate: 60,
+          bulletSpeed: 60
+        },
+        goals: []
+      }));
 
     render(<App />);
 
@@ -125,5 +195,149 @@ describe("App", () => {
     await userEvent.click(button);
 
     expect(fetchMock).toHaveBeenCalledWith("http://localhost:4000/schema/bot/example", expect.any(Object));
+  });
+
+  it("shows the post-match result card with Exit, Replay, and Play Again actions for a live result", async () => {
+    const onReplayStart = jest.fn();
+    const onPlayAgain = jest.fn();
+    const onExit = jest.fn();
+
+    render(
+      <BattlefieldStagePage
+        replay={{ id: "live-local", replay: replayFrames }}
+        liveFrame={replayFrames[replayFrames.length - 1]}
+        battlefieldMode="result"
+        outcome={{
+          winnerTankId: "left",
+          winnerName: "Backstep Viper",
+          leftTankName: "Backstep Viper",
+          rightTankName: "Ricochet Lynx",
+          reason: "elimination",
+          totalTicks: 2,
+          mapId: "crossfire",
+          source: "liveResult"
+        }}
+        status="Battle saved. Press Replay when you are ready to watch it."
+        mapName="Crossfire"
+        mapId="crossfire"
+        liveSpeed={1}
+        replaySpeed={1}
+        replayPlaybackToken={0}
+        onReplayStart={onReplayStart}
+        showPlayAgain
+        onPlayAgain={onPlayAgain}
+        onLiveSpeedChange={() => undefined}
+        onReplaySpeedChange={() => undefined}
+        onPlaybackComplete={() => undefined}
+        onExit={onExit}
+        onSignOut={() => undefined}
+      />
+    );
+
+    expect(screen.getByText(/Backstep Viper Wins/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Exit to Matchmaking/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Replay$/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Play Again/i })).toBeInTheDocument();
+    expect(screen.queryByRole("toolbar", { name: /Replay speed controls/i })).not.toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /Play Again/i }));
+
+    expect(onPlayAgain).toHaveBeenCalled();
+  });
+
+  it("shows live speed controls on the battlefield and defaults to 1x", async () => {
+    const onLiveSpeedChange = jest.fn();
+
+    render(
+      <BattlefieldStagePage
+        replay={null}
+        liveFrame={replayFrames[0]}
+        battlefieldMode="live"
+        outcome={null}
+        status="Live battle started."
+        mapName="Crossfire"
+        mapId="crossfire"
+        liveSpeed={1}
+        replaySpeed={1}
+        replayPlaybackToken={0}
+        onReplayStart={() => undefined}
+        showPlayAgain={false}
+        onPlayAgain={() => undefined}
+        onLiveSpeedChange={onLiveSpeedChange}
+        onReplaySpeedChange={() => undefined}
+        onPlaybackComplete={() => undefined}
+        onExit={() => undefined}
+        onSignOut={() => undefined}
+      />
+    );
+
+    expect(screen.getByRole("toolbar", { name: /Live speed controls/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^1x$/i })).toHaveClass("active");
+
+    await userEvent.click(screen.getByRole("button", { name: /^4x$/i }));
+
+    expect(onLiveSpeedChange).toHaveBeenCalledWith(4);
+  });
+
+  it("does not show Play Again for saved replay result screens", () => {
+    render(
+      <BattlefieldStagePage
+        replay={{ id: "match-1", replay: replayFrames }}
+        liveFrame={replayFrames[replayFrames.length - 1]}
+        battlefieldMode="replayComplete"
+        outcome={{
+          winnerTankId: "left",
+          winnerName: "Pilot Bot",
+          leftTankName: "Pilot Bot",
+          rightTankName: "Backstep Viper",
+          reason: "elimination",
+          totalTicks: 2,
+          mapId: "crossfire",
+          source: "savedReplay"
+        }}
+        status="Replay complete. Choose Exit or Replay Again."
+        mapName="Crossfire"
+        mapId="crossfire"
+        liveSpeed={1}
+        replaySpeed={1}
+        replayPlaybackToken={0}
+        onReplayStart={() => undefined}
+        showPlayAgain={false}
+        onPlayAgain={() => undefined}
+        onLiveSpeedChange={() => undefined}
+        onReplaySpeedChange={() => undefined}
+        onPlaybackComplete={() => undefined}
+        onExit={() => undefined}
+        onSignOut={() => undefined}
+      />
+    );
+
+    expect(screen.queryByRole("button", { name: /^Play Again$/i })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Replay Again/i })).toBeInTheDocument();
+  });
+
+  it("opens a saved replay with replay controls and can exit back to matchmaking", async () => {
+    window.localStorage.setItem("tank-token", "token");
+    window.history.pushState({}, "", "/matchmaking");
+    fetchMock
+      .mockResolvedValueOnce(ok({ id: "1", username: "pilot", email: "pilot@example.com" }))
+      .mockResolvedValueOnce(ok(privateBots))
+      .mockResolvedValueOnce(ok(savedMatches))
+      .mockResolvedValueOnce(ok(maps))
+      .mockResolvedValueOnce(ok({ id: "match-1", replay: replayFrames }));
+
+    render(<App />);
+
+    const replayButton = await screen.findByRole("button", { name: /Pilot Bot vs Backstep Viper/i });
+    await userEvent.click(replayButton);
+
+    expect(await screen.findByText(/Replay broadcast/i)).toBeInTheDocument();
+    expect(screen.getByRole("toolbar", { name: /Replay speed controls/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /0.25x/i })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /4x/i })).toBeInTheDocument();
+
+    await userEvent.click(screen.getByRole("button", { name: /Exit to matchmaking/i }));
+
+    expect(await screen.findByText(/Lock in the duel/i)).toBeInTheDocument();
   });
 });
